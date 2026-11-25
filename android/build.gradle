@@ -66,14 +66,24 @@ android {
         implementation "androidx.lifecycle:lifecycle-runtime:2.8.7"
         implementation "org.apache.tika:tika-core:3.2.3"
     }
-    kotlinOptions {
-        jvmTarget = JavaVersion.VERSION_11.toString()
+    if (!builtInKotlin) {
+        kotlinOptions {
+            jvmTarget = JavaVersion.VERSION_11.toString()
+        }
     }
 
     if (project.android.hasProperty("namespace")) {
         namespace 'com.mr.flutter.plugin.filepicker' 
     }
 }
+if (builtInKotlin) {
+    kotlin {
+        compilerOptions {
+            jvmTarget = org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_11
+        }
+    }
+}
+
 dependencies {
     implementation 'androidx.core:core-ktx:1.15.0'
 }
