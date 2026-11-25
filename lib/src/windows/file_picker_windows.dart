@@ -27,7 +27,8 @@ class FilePickerWindows extends FilePicker {
     List<String>? allowedExtensions,
     Function(FilePickerStatus)? onFileLoading,
     @Deprecated(
-        'allowCompression is deprecated and has no effect. Use compressionQuality instead.')
+      'allowCompression is deprecated and has no effect. Use compressionQuality instead.',
+    )
     bool allowCompression = false,
     bool allowMultiple = false,
     bool withData = false,
@@ -69,12 +70,14 @@ class FilePickerWindows extends FilePicker {
   List<String>? _pickFiles(_OpenSaveFileArgs args) {
     final comdlg32 = DynamicLibrary.open('comdlg32.dll');
 
-    final getOpenFileNameW =
-        comdlg32.lookupFunction<GetOpenFileNameW, GetOpenFileNameWDart>(
-            'GetOpenFileNameW');
+    final getOpenFileNameW = comdlg32
+        .lookupFunction<GetOpenFileNameW, GetOpenFileNameWDart>(
+          'GetOpenFileNameW',
+        );
 
-    final Pointer<OPENFILENAMEW> openFileNameW =
-        _instantiateOpenFileNameW(args);
+    final Pointer<OPENFILENAMEW> openFileNameW = _instantiateOpenFileNameW(
+      args,
+    );
 
     final result = getOpenFileNameW(openFileNameW);
     late final List<String>? files;
@@ -112,9 +115,10 @@ class FilePickerWindows extends FilePicker {
     String? initialDirectory = args['initialDirectory'] as String?;
     bool lockParentWindow = args['lockParentWindow'] as bool? ?? false;
 
-    int hr = CoInitializeEx(
-      nullptr,
-      COINIT.COINIT_APARTMENTTHREADED | COINIT.COINIT_DISABLE_OLE1DDE,
+    // mos: win32 6.x — CoInitializeEx takes only the COINIT flags and
+    // returns HRESULT; the flags are top-level consts, not COINIT members.
+    final hr = CoInitializeEx(
+      COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE,
     );
 
     if (!SUCCEEDED(hr)) {
@@ -122,73 +126,49 @@ class FilePickerWindows extends FilePicker {
     }
 
     try {
-      final fileDialog = FileOpenDialog.createInstance();
+      // mos: win32 6.x — create via the top-level helper; FileOpenDialog
+      // is a GUID const, IFileDialog methods throw instead of returning
+      // HRESULT, and return values directly instead of out-params.
+      final fileDialog = createInstance<IFileOpenDialog>(FileOpenDialog);
 
-      final optionsPointer = calloc<Uint32>();
+      final options =
+          fileDialog.getOptions() |
+          FOS_PICKFOLDERS |
+          FOS_FORCEFILESYSTEM |
+          FOS_NOCHANGEDIR;
+      fileDialog.setOptions(options);
+
+      final title = (dialogTitle ?? defaultDialogTitle).toNativeUtf16();
       try {
-        hr = fileDialog.getOptions(optionsPointer);
-        if (!SUCCEEDED(hr)) throw WindowsException(hr);
-
-        final options = optionsPointer.value |
-            FILEOPENDIALOGOPTIONS.FOS_PICKFOLDERS |
-            FILEOPENDIALOGOPTIONS.FOS_FORCEFILESYSTEM |
-            FILEOPENDIALOGOPTIONS.FOS_NOCHANGEDIR;
-        hr = fileDialog.setOptions(options);
-        if (!SUCCEEDED(hr)) throw WindowsException(hr);
-      } finally {
-        free(optionsPointer);
-      }
-
-      final title = TEXT(dialogTitle ?? defaultDialogTitle);
-      try {
-        hr = fileDialog.setTitle(title);
-        if (!SUCCEEDED(hr)) throw WindowsException(hr);
+        fileDialog.setTitle(PCWSTR(title));
       } finally {
         free(title);
       }
 
       if (initialDirectory != null) {
-        final folder = TEXT(initialDirectory);
-        final riid = convertToIID(IID_IShellItem);
-        final ppv = calloc<Pointer>();
-
+        final folder = initialDirectory.toNativeUtf16();
         try {
-          hr = SHCreateItemFromParsingName(folder, nullptr, riid, ppv);
-          if (!SUCCEEDED(hr) || ppv.value == nullptr) {
-            throw WindowsException(hr);
-          }
-
-          final item = IShellItem(ppv.cast());
-          hr = fileDialog.setFolder(item.ptr.cast<Pointer<COMObject>>().value);
-          if (!SUCCEEDED(hr)) throw WindowsException(hr);
+          final item = SHCreateItemFromParsingName<IShellItem>(
+            PCWSTR(folder),
+            null,
+          );
+          fileDialog.setFolder(item);
         } finally {
           free(folder);
-          free(riid);
-          free(ppv);
         }
       }
 
-      final hwndOwner = lockParentWindow ? GetForegroundWindow() : NULL;
-      hr = fileDialog.show(hwndOwner);
-      if (!SUCCEEDED(hr)) return null;
-
-      final ppv = calloc<Pointer<COMObject>>();
-      String? selectedPath;
+      final hwndOwner = lockParentWindow ? GetForegroundWindow() : null;
       try {
-        hr = fileDialog.getResult(ppv);
-        if (!SUCCEEDED(hr)) throw WindowsException(hr);
-
-        final item = IShellItem(ppv.cast());
-        final pathPtr = calloc<Pointer<Utf16>>();
-        hr = item.getDisplayName(SIGDN.SIGDN_FILESYSPATH, pathPtr);
-        if (SUCCEEDED(hr)) {
-          selectedPath = pathPtr.value.toDartString();
-        }
-        free(pathPtr);
-      } finally {
-        free(ppv);
+        fileDialog.show(hwndOwner);
+      } on WindowsException {
+        // Dialog dismissed / cancelled.
+        return null;
       }
-      return selectedPath;
+
+      final item = fileDialog.getResult();
+      if (item == null) return null;
+      return item.getDisplayName(SIGDN_FILESYSPATH).toDartString();
     } finally {
       CoUninitialize();
     }
@@ -206,17 +186,18 @@ class FilePickerWindows extends FilePicker {
   }) async {
     final port = ReceivePort();
     await Isolate.spawn(
-        _callSaveFile,
-        _OpenSaveFileArgs(
-          port: port.sendPort,
-          defaultFileName: fileName,
-          dialogTitle: dialogTitle,
-          initialDirectory: initialDirectory,
-          type: type,
-          allowedExtensions: allowedExtensions,
-          lockParentWindow: lockParentWindow,
-          confirmOverwrite: true,
-        ));
+      _callSaveFile,
+      _OpenSaveFileArgs(
+        port: port.sendPort,
+        defaultFileName: fileName,
+        dialogTitle: dialogTitle,
+        initialDirectory: initialDirectory,
+        type: type,
+        allowedExtensions: allowedExtensions,
+        lockParentWindow: lockParentWindow,
+        confirmOverwrite: true,
+      ),
+    );
     final savedFilePath = (await port.first) as String?;
     await saveBytesToFile(bytes, savedFilePath);
     return savedFilePath;
@@ -225,12 +206,14 @@ class FilePickerWindows extends FilePicker {
   String? _saveFile(_OpenSaveFileArgs args) {
     final comdlg32 = DynamicLibrary.open('comdlg32.dll');
 
-    final getSaveFileNameW =
-        comdlg32.lookupFunction<GetSaveFileNameW, GetSaveFileNameWDart>(
-            'GetSaveFileNameW');
+    final getSaveFileNameW = comdlg32
+        .lookupFunction<GetSaveFileNameW, GetSaveFileNameWDart>(
+          'GetSaveFileNameW',
+        );
 
-    final Pointer<OPENFILENAMEW> openFileNameW =
-        _instantiateOpenFileNameW(args);
+    final Pointer<OPENFILENAMEW> openFileNameW = _instantiateOpenFileNameW(
+      args,
+    );
 
     final result = getSaveFileNameW(openFileNameW);
     String? returnValue;
@@ -266,7 +249,8 @@ class FilePickerWindows extends FilePicker {
   void validateFileName(String fileName) {
     if (fileName.contains(RegExp(r'[<>:/\\|?*"]'))) {
       throw IllegalCharacterInFileNameException(
-          'Reserved characters may not be used in file names. See: https://docs.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions');
+        'Reserved characters may not be used in file names. See: https://docs.microsoft.com/en-us/windows/win32/fileio/naming-a-file#naming-conventions',
+      );
     }
   }
 
@@ -332,14 +316,16 @@ class FilePickerWindows extends FilePicker {
     final Pointer<OPENFILENAMEW> openFileNameW = calloc<OPENFILENAMEW>();
 
     openFileNameW.ref.lStructSize = sizeOf<OPENFILENAMEW>();
-    openFileNameW.ref.lpstrTitle =
-        (args.dialogTitle ?? defaultDialogTitle).toNativeUtf16();
+    openFileNameW.ref.lpstrTitle = (args.dialogTitle ?? defaultDialogTitle)
+        .toNativeUtf16();
     openFileNameW.ref.lpstrFile = calloc.allocate<Utf16>(lpstrFileBufferSize);
-    openFileNameW.ref.lpstrFilter =
-        fileTypeToFileFilter(args.type, args.allowedExtensions).toNativeUtf16();
+    openFileNameW.ref.lpstrFilter = fileTypeToFileFilter(
+      args.type,
+      args.allowedExtensions,
+    ).toNativeUtf16();
     openFileNameW.ref.nMaxFile = lpstrFileBufferSize;
-    openFileNameW.ref.lpstrInitialDir =
-        (args.initialDirectory ?? '').toNativeUtf16();
+    openFileNameW.ref.lpstrInitialDir = (args.initialDirectory ?? '')
+        .toNativeUtf16();
     openFileNameW.ref.flags =
         ofnExplorer | ofnFileMustExist | ofnHideReadOnly | ofnNoChangeDir;
 
@@ -376,13 +362,16 @@ class FilePickerWindows extends FilePicker {
   Pointer _getWindowHandle() {
     final user32 = DynamicLibrary.open('user32.dll');
 
-    final findWindowA = user32.lookupFunction<
-        Int32 Function(Pointer<Utf8> lpClassName, Pointer<Utf8> lpWindowName),
-        int Function(Pointer<Utf8> lpClassName,
-            Pointer<Utf8> lpWindowName)>('FindWindowA');
+    final findWindowA = user32
+        .lookupFunction<
+          Int32 Function(Pointer<Utf8> lpClassName, Pointer<Utf8> lpWindowName),
+          int Function(Pointer<Utf8> lpClassName, Pointer<Utf8> lpWindowName)
+        >('FindWindowA');
 
-    int hWnd =
-        findWindowA('FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf8(), nullptr);
+    int hWnd = findWindowA(
+      'FLUTTER_RUNNER_WIN32_WINDOW'.toNativeUtf8(),
+      nullptr,
+    );
 
     return Pointer.fromAddress(hWnd);
   }
